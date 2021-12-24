@@ -2,40 +2,44 @@ package exchangeapi
 
 import (
 	"context"
-	"log"
-	"os"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill/message"
 )
 
+// FairPriceCalcModel interface with method of calc fair price
 type FairPriceCalcModel interface {
-	GetFairPrice(InputData *[]float64) float64
+	GetFairPrice(InputData map[int]float64) float64
 }
 
+// FairPriceCalculator is the main entity app. It is collecting data and calculating faire price
 type FairPriceCalculator struct {
+	sync.RWMutex
 	ExchangeDataChan <-chan *message.Message
-	BarData      *map[string]float64
-	Model        FairPriceCalcModel
-	CalcInterval int
-	l            *log.Logger
+	BarData          map[int]float64    // basket for data collection by sourceID
+	StartBarDataTime time.Time          // time since backet collect data
+	Model            FairPriceCalcModel // model type
+	CalcInterval     int                // interval in seconds to change basket and calc FP
 }
 
-func NewFairPriceCalculator(exchangeDataChan <-chan *message.Message, 
+// NewFairPriceCalculator - constructor FairPriceCalculator
+func NewFairPriceCalculator(exchangeDataChan <-chan *message.Message,
 	calcInterval int, model FairPriceCalcModel) *FairPriceCalculator {
-	bar := make(map[string]float64)
-	infoLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
-
 	return &FairPriceCalculator{
 		ExchangeDataChan: exchangeDataChan,
-		BarData:      &bar,
-		Model:        model,
-		CalcInterval: calcInterval,
-		l:            infoLog,
+		BarData:          make(map[int]float64),
+		StartBarDataTime: time.Now(),
+		Model:            model,
+		CalcInterval:     calcInterval,
 	}
 }
 
-
+// SubscribeRun listen channel and call HandleMessage func
+// nolint:wrapcheck // demo mode
 func (c *FairPriceCalculator) SubscribeRun(ctx context.Context) error {
 	for {
 		select {
@@ -48,16 +52,37 @@ func (c *FairPriceCalculator) SubscribeRun(ctx context.Context) error {
 	}
 }
 
+// HandleMessage - parse, validate and save data to basket
+// nolint:gomnd // demo-mode
 func (c *FairPriceCalculator) HandleMessage(msg *message.Message) {
+	// parse
+	var data TickerPrice
 
-	// пайлоад - строку - структуру
-	// валидируем дату
-	// заполняем мапу
+	err := json.Unmarshal(msg.Payload, &data)
+	if err != nil {
+		return
+	}
 
+	// validate
+	if c.StartBarDataTime.Sub(data.Time) > 0 {
+		return
+	}
+
+	price, err := strconv.ParseFloat(data.Price, 64)
+	if err != nil {
+		return
+	}
+
+	// save
+	c.Lock()
+	c.BarData[data.SourceID] = price
+	c.Unlock()
 }
 
+// FairPriceCalcRun - runner winch HandleBarData every CalcInterval
+// nolint:wrapcheck // demo mode
 func (c *FairPriceCalculator) FairPriceCalcRun(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(c.CalcInterval)*time.Second)
+	ticker := time.NewTicker(time.Duration(c.CalcInterval) * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -70,16 +95,19 @@ func (c *FairPriceCalculator) FairPriceCalcRun(ctx context.Context) error {
 	}
 }
 
-func (c *FairPriceCalculator)HandleBarData(){
-	//  ссыль на мапу
-			// блокировка мьютекса
-			// ссыль на новую мапу
-			// разблокировка мьютекса
-			// мапу в массив в модель
-			// вывод результата
+// HandleBarData call model to calculate FP and show result
+// nolint:forbidigo // demo-code
+func (c *FairPriceCalculator) HandleBarData() {
+	bardata := c.BarData
+	startTime := c.StartBarDataTime
 
-		c.l.Println("HandleBarData")
+	c.Lock()
+	c.BarData = make(map[int]float64)
+	c.StartBarDataTime = time.Now()
+	c.Unlock()
 
+	res := c.Model.GetFairPrice(bardata)
+	timestamp := startTime.Unix()
+
+	fmt.Println(timestamp, fmt.Sprintf("%.2f", res))
 }
-
-
